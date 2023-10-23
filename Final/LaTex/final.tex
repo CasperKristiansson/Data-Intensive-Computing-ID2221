@@ -6,6 +6,7 @@
 \usepackage{amssymb}
 \usepackage{hyperref}
 \usepackage{cleveref}
+\usepackage{tabularx}
 \usepackage[backend=biber, sorting=none, style=ieee]{biblatex}
 \addbibresource{main.bib}
 
@@ -77,6 +78,244 @@ NIST is defined by:
     \item \textbf{Structured data}
     \item \textbf{Machine Learning:} Data analysis supervised and unsupervised learning
 \end{itemize}
+
+\section{Storage}
+\begin{itemize}
+    \item \href{https://id2221kth.github.io/slides/2023/02_storage_part1.pdf}{Link to Storage Part 1}
+    \item \href{https://id2221kth.github.io/slides/2023/03_storage_part2.pdf}{Link to Storage Part 2}
+\end{itemize}
+
+\subsection{File System}
+\begin{itemize}
+    \item Controls how data is \textbf{stored in} and \textbf{retrieved from} a storage device.
+    \item Distributed is used when data \textbf{outgrows} the storage capacity of a single machine and is required to use a partition of a number of separate machines.
+\end{itemize}
+
+\subsection{Google File System (GFS)}
+\subsubsection{Motivation and Assumptions}
+\begin{itemize}
+    \item Huge files (multi-GB)
+\end{itemize}
+
+\begin{itemize}
+    \item Files are usually modified by appending to the end meaning that \textbf{random} writes are basically non-existent.
+    \item Optimize for streaming access.
+    \item Node failure happens frequently.
+\end{itemize}
+
+\subsubsection{Optimized for streaming}
+\begin{itemize}
+    \item This means write once and read many (uses an append write system and successive read (like streaming)).
+\end{itemize}
+
+\subsubsection{Files and Chunks}
+\begin{itemize}
+    \item Files are split into different chunks.
+    \item A chunk is an immutable and globally unique chunk handle. Each chunk is stored as a plain Linux file.
+\end{itemize}
+
+\subsubsection{GFS Architecture}
+\paragraph{GFS Master}
+\begin{itemize}
+    \item Responsible for all system-wide activities.
+    \item Maintains all file system metadata such as namespaces, mapping from files to chunks, locations, etc. Everything is kept in memory and is persistently in the operation log.
+    \item It periodically communicates with each chunk server to determine the location and overall state of the system (health).
+\end{itemize}
+
+\paragraph{GFS Chunkserver}
+\begin{itemize}
+    \item Manage chunks.
+    \item Tells master what the chunks it has.
+    \item Stores chunks as files.
+    \item Maintains data consistency of chunks.
+\end{itemize}
+
+\paragraph{GFS Client}
+\begin{itemize}
+    \item Issues control requests to master.
+    \item Issues data requests directly to chunk servers.
+    \item Caches metadata but does not cache data.
+\end{itemize}
+
+\subsubsection{Data Flow and Control Flow}
+\begin{itemize}
+    \item Data flow is decoupled from the control flow.
+    \item This means the client only interacts with the master for metadata operations.
+    \item The client interacts with chunk servers for data.
+\end{itemize}
+
+\subsubsection{Why Large Chunks?}
+\begin{itemize}
+    \item 64MB or 128MB.
+    \item \textbf{Advantage:} Reduces the size of the metadata stored in the master.
+    \item \textbf{Advantage:} Reduces client's need to interact with the master.
+    \item \textbf{Disadvantage:} Wasted space due to internal fragmentation.
+\end{itemize}
+
+\subsubsection{System Interface}
+\begin{itemize}
+    \item Supports typical file operations such as create, delete, open, close, read, and write.
+    \item \textbf{Snapshot} creates a copy of a file or a directory tree at a low cost.
+    \item \textbf{Append} allows multiple clients to append data to the same file concurrently.
+\end{itemize}
+
+\subsubsection{Read Operation}
+\begin{enumerate}
+    \item The application sends a read request
+    \item GFS client translates the request and sends it to the master
+    \item Master responds with chunk handle and replica locations
+    \item The client picks a location and sends a request
+    \item The chunk server sends the requested data
+    \item The client forwards the data to the application
+\end{enumerate}
+
+\subsubsection{Update Order}
+\begin{itemize}
+    \item \textbf{Update (mutation):} An operation that changes the content or metadata of a chunk
+    \item For consistency updates to each chunk must be ordered
+    \item In order to uphold consistency between replicas one replica is designated as the primary and the other replicas are \textbf{secondaries}
+    \item \textbf{Primary} defines the update order
+\end{itemize}
+
+\subsubsection{Primary Leases}
+\begin{itemize}
+    \item For correctness, there is one single primary for each chunk.
+    \item The Master is responsible for selecting a chunk server as primary and granting it a lease
+    \item A chunk server will hold a lease for a period of time where it will behave as a primary. If the master doesn't hear from the chunk server during a period of time it will give the lease to another chunk server
+\end{itemize}
+
+\subsubsection{Write Operation}
+\begin{enumerate}
+    \item The application sends a request
+    \item GFS client translates it and sends it to the master
+    \item Master responds with chunk handle and replica locations
+    \item The client pushes write data to all locations where the data then is stored in the chunk server's internal buffer
+    \item The client sends a write command to the primary
+    \item The primary determines the order in its buffer and writes it in the order to the chunk
+    \item The primary sends the serial order to the secondary
+\end{enumerate}
+
+\subsubsection{Write Consistency}
+\begin{itemize}
+    \item Primary enforces one update order across all replicas for concurrent writes
+    \item The primary will wait until all replicas are finished writing before sending back a reply
+    \item Doing this will ensure identical replicas, but because the received order of data is different from the replicas there might be mingled fragments and therefore writes are \textbf{consistent but undefined state} in GFS.
+\end{itemize}
+
+\subsubsection{Append Operation}
+\begin{enumerate}
+    \item Application sends the request
+    \item Client translates it and sends it to the master
+    \item The master responds with a chunk handle and replica locations
+    \item The client pushes write data to all locations
+    \item The primary checks if the record fits in a specified chunk
+    \item If the record does not fit then the primary will:
+    \begin{itemize}
+        \item Pads the chunk
+        \item tells secondaries to do the same
+        \item informs the client
+        \item the client then retries the append with the next chunk
+    \end{itemize}
+    \item If the record fits then the primary will:
+    \begin{itemize}
+        \item Append the record
+        \item Tell secondaries to do the same
+        \item Receive responses from the secondary
+        \item Respond to the client
+    \end{itemize}
+\end{enumerate}
+
+\subsubsection{Delete Operation}
+\begin{itemize}
+    \item Metadata operations
+    \item Renames a file to a special name
+    \item After a certain time the actual chunks
+    \item Supports undelete for a limited time
+    \item Actual lazy garbage collection
+\end{itemize}
+
+\subsubsection{Single Master}
+\begin{itemize}
+    \item The master has global knowledge of the whole system which also helps with simplified design and hopefully never bottlenecks.
+\end{itemize}
+
+\subsubsection{Namespace Management and Locking}
+\begin{itemize}
+    \item Namespace as a lookup table mapping pathnames to metadata
+    \item Each master requires a set of locks before it runs. Like read locks on internal nodes and read/write locks on the leaf
+    \item Example: creating multiple files (f1 and f2) in the same directory (/home/user/).
+    \begin{itemize}
+        \item Each operation acquires a read lock on the directory name /home/user/. Prevents the directory from deleting, renaming, or snapshotting. Allows concurrent mutations in the same directory
+        \item Each operation acquires a write lock on the file names f1 and f2
+    \end{itemize}
+\end{itemize}
+
+\subsubsection{Replica Placement}
+\begin{itemize}
+    \item Maximize data reliability, availability, and bandwidth utilization
+    \item The master determines the replica placement
+\end{itemize}
+
+\subsubsection{Creation, Re-replication, and Re-balancing}
+\begin{description}
+    \item[Creation] Place a new replica on a chunk server with below-average disk usage
+    \item[Re-replication] When the number of available replicas falls below the user-specified goal
+    \item[Re-balancing] Periodically for better disk utilization and load balancing
+\end{description}
+
+\subsubsection{Garbe Collection}
+\begin{itemize}
+    \item File deletion logged by master
+    \item The file was renamed to a hidden name with a deletion timestamp
+    \item Master removes hidden files older than 3 days
+    \item Until then hidden files can be read and undeleted
+    \item After deletion, in-memory metadata is also erased
+\end{itemize}
+
+\subsubsection{Stale Replica Detection}
+\begin{itemize}
+    \item If a chunk replica becomes stale meaning that it failed and missed a mutation
+    \item Needs to see the difference between up-to-date and stale replicas
+    \item Uses a chunk version number which is increased when the master grants a new lease on the chunk
+    \item Stale replicas are deleted by the master in regular garbage collection
+\end{itemize}
+
+\subsubsection{Fault Tolerance}
+\begin{itemize}
+    \item Chunk replication
+    \item Data integrity such as checksum which is checked every time an application reads the data
+    \item All chunks are versioned
+    \item The master state is replicated on multiple machines
+    \item When a master fails it can restart almost instantly
+    \item A Shadow master provides only read-only access to the file system when the primary master is down
+\end{itemize}
+
+\subsection{GFS vs HDFS}
+
+\begin{table}[!h]
+\centering
+\begin{tabularx}{\textwidth}{|X|X|X|}
+\hline
+ & \textbf{GFS} & \textbf{HDFS} \\
+\hline
+\textbf{Master/NameNode} & Master & NameNode \\
+\hline
+\textbf{Chunkserver/DataNode} & Chunkserver & DataNode \\
+\hline
+\textbf{Operation Log} & Operation Log & Journal, Edit Log \\
+\hline
+\textbf{Chunk/Block} & Chunk & Block \\
+\hline
+\textbf{Write type} & Random file writes possible & Only append is possible \\
+\hline
+\textbf{Read/Write Model} & Multiple write/reader model & Single write/multiple reader model \\
+\hline
+\textbf{Default Chunk Size} & 64MB & 128MB \\
+\hline
+\end{tabularx}
+\caption{Comparison between GFS and HDFS}
+\end{table}
+
 
 \end{document}
 
